@@ -1,0 +1,32 @@
+{
+  "name": "@brayjamin/cursed-network",
+  "version": "1.0.0",
+  "description": "Protocols for cross-server communication under the CursedMC proxy. ",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/brayjamin/cursed-network.git"
+  },
+  "dependencies": {
+    "@grakkit/socket": "1.0.4",
+    "@grakkit/stdlib-paper": "1.0.14"
+  },
+  "devDependencies": {
+    "typescript": "4.4.3"
+  },
+  "keywords": [
+    "brayjamin",
+    "grakkit",
+    "cursedmc",
+    "cursed-network"
+  ],
+  "author": "brayjamin",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/brayjamin/cursed-network/issues"
+  },
+  "homepage": "https://github.com/brayjamin/cursed-network#readme"
+}
