@@ -75,10 +75,10 @@ setImmediate(() => {
 const UUID = type('java.util.UUID');
 const thisClient = new Client();
 type NodeType = 'server' | 'client';
-function register (type: NodeType, port: number, NodeName: string) {
+function register (type: NodeType, port: number, name: string) {
    Port = port;
    NodeType = type;
-   NodeName = NodeName;
+   NodeName = name;
    switch (type) {
       case 'server': {
          Proxy = new Server();
@@ -193,14 +193,23 @@ const fn = {
       if (!fn.userExists(friendee_id)) return 'FRIENDEE_ID_INVALID';
       // if friends
       const q = sql.query(
-         `SELECT * FROM friendships WHERE friendee_id = '${friendee_id}' AND friender_id = '${friender_id}' AND accepted_at IS NOT null AND blocked_at IS null`
+         justify(
+            `SELECT * FROM users AS \`friend\``,
+            `JOIN friendships ON friender_id = friend.id OR friendee_id = friend.id`,
+            `WHERE`,
+            `('${friender_id}' in (friender_id) OR`,
+            `'${friendee_id}' in (friender_id))`,
+            `AND ('${friendee_id}' in (friendee_id)`,
+            `OR '${friender_id}' in (friendee_id))`,
+            `AND accepted_at IS NOT null`
+         )
       );
       if (q != null && q.next() && q.getString('accepted_at') != null) {
          // remove friend
          return sql.update(
             justify(
                `DELETE FROM friendships`,
-               `WHERE friender_id = '${friender_id}' AND friendee_id = '${friendee_id}'`
+               `WHERE friender_id = '${friender_id}' AND friendee_id = '${friendee_id}' OR friender_id = '${friendee_id}' AND friendee_id = '${friender_id}'`
             )
          );
       } else return 'NOT_FRIENDS';
@@ -209,6 +218,34 @@ const fn = {
       const q = sql.query(`SELECT * FROM users WHERE id = '${id}'`);
       if (q != null && q.next() && q.getString('id') != null) return true;
       return false;
+   },
+   declineRequest (friender_id, friendee_id): boolean | 'FRIENDEE_ID_INVALID' {
+      if (!fn.userExists(friendee_id)) return 'FRIENDEE_ID_INVALID';
+      const q = sql.query(
+         justify(
+            `SELECT * FROM users AS \`friend\``,
+            `JOIN friendships ON friender_id = friend.id OR friendee_id = friend.id`,
+            `WHERE`,
+            `('${friender_id}' in (friender_id) OR`,
+            `'${friendee_id}' in (friender_id))`,
+            `AND ('${friendee_id}' in (friendee_id)`,
+            `OR '${friender_id}' in (friendee_id))`,
+            `AND accepted_at IS null AND blocked_at IS null;`
+         )
+      );
+      if (q != null && q.next())
+         return sql.update(
+            justify(
+               `DELETE FROM friendships`,
+               `WHERE`,
+               `('${friender_id}' in (friender_id) OR`,
+               `'${friendee_id}' in (friender_id))`,
+               `AND ('${friendee_id}' in (friendee_id)`,
+               `OR '${friender_id}' in (friendee_id))`,
+               `AND accepted_at IS null;`
+            )
+         );
+      else return false;
    },
    addFriend (
       friender_id,
@@ -249,35 +286,59 @@ const fn = {
          else return 'REQUEST_NOT_ACTIVE';
       }
    },
-   sendFriendRequest (friender_id, friendee_id): boolean | 'ALREADY_SENT' | 'ALREADY_FRIEND' | 'FRIENDEE_ID_INVALID' {
+   test (friender_id, friendee_id) {
+      return sql.query(
+         justify(
+            `SELECT * FROM users AS \`friend\``,
+            `JOIN friendships ON friender_id = friend.id OR friendee_id = friend.id`,
+            `WHERE`,
+            `('${friender_id}' in (friender_id) OR`,
+            `'${friendee_id}' in (friender_id))`,
+            `AND ('${friendee_id}' in (friendee_id)`,
+            `OR '${friender_id}' in (friendee_id))`,
+            `AND accepted_at IS null AND blocked_at IS null`
+         )
+      );
+   },
+   sendFriendRequest (
+      friender_id,
+      friendee_id
+   ): boolean | 'AUTO_ACCEPTED' | 'ALREADY_SENT' | 'ALREADY_FRIEND' | 'FRIENDEE_ID_INVALID' {
       /* If a friend request exists */
       if (!fn.userExists(friendee_id)) return 'FRIENDEE_ID_INVALID';
-      if (
-         sql.query(
-            `SELECT * FROM friendships WHERE friendee_id = '${friendee_id}' OR friendee_id = '${friender_id}' AND friender_id = '${friender_id}' OR friender_id = '${friendee_id}' AND accepted_at IS null;`
-         ) != null &&
-         sql
-            .query(
-               `SELECT * FROM friendships WHERE friendee_id = '${friendee_id}' OR friendee_id = '${friender_id}' AND friender_id = '${friender_id}' OR friender_id = '${friendee_id}' AND accepted_at IS null;`
-            )
-            .next()
-      )
-         return 'ALREADY_SENT';
-      else if (
-         sql.query(
+      const q = sql.query(
+         justify(
+            `SELECT * FROM users AS \`friend\``,
+            `JOIN friendships ON friender_id = friend.id OR friendee_id = friend.id`,
+            `WHERE`,
+            `('${friender_id}' in (friender_id) OR`,
+            `'${friendee_id}' in (friender_id))`,
+            `AND ('${friendee_id}' in (friendee_id)`,
+            `OR '${friender_id}' in (friendee_id))`,
+            `AND accepted_at IS null AND blocked_at IS null`
+         )
+      );
+      if (q != null && q.next()) {
+         switch (q.getString('friender_id')) {
+            case friender_id:
+               return 'ALREADY_SENT';
+            case friendee_id: {
+               fn.addFriend(friendee_id, friender_id);
+               return 'AUTO_ACCEPTED';
+            }
+         }
+      } else {
+         const q2 = sql.query(
             `SELECT * FROM friendships WHERE friendee_id = '${friendee_id}' OR friendee_id = '${friender_id}' AND friender_id = '${friender_id}' OR friender_id = '${friendee_id}' AND accepted_at IS NOT null;`
-         ) != null &&
-         sql
-            .query(
-               `SELECT * FROM friendships WHERE friendee_id = '${friendee_id}' OR friendee_id = '${friender_id}' AND friender_id = '${friender_id}' OR friender_id = '${friendee_id}' AND accepted_at IS NOT null;`
-            )
-            .next()
-      )
-         return 'ALREADY_FRIEND';
-      else
-         return sql.update(
-            justify(`INSERT INTO friendships (friender_id, friendee_id) VALUES ('${friender_id}', '${friendee_id}');`)
          );
+         if (q2 != null && q2.next()) return 'ALREADY_FRIEND';
+         else
+            return sql.update(
+               justify(
+                  `INSERT INTO friendships (friender_id, friendee_id) VALUES ('${friender_id}', '${friendee_id}');`
+               )
+            );
+      }
    },
    getNameFromUuid (id: string): string {
       const q = sql.query(`SELECT * FROM users WHERE id = '${id}';`);
@@ -357,11 +418,25 @@ function sendFriendList (player) {
 }
 const feedback = {
    friends: {
+      args: [
+         'help for /friend',
+         ' ',
+         '/f add <name> - send a friend request',
+         '/f remove <name> - unfriend a player',
+         '/f list - view all your friends',
+         '/f accept <name> - accept a friend request',
+         '/f deny <name> - decline a friend request',
+         '/f | /f help - show this message'
+      ],
       already_friend: 'You are already friends with this player!',
       friendee_id_invalid: 'This user does not exist!',
       already_sent: "You've already sent a friend request to this player!",
       not_friends: "You're already not friends with this player!",
       request_not_active: "You haven't received a friend request from this player!",
+      declined_request: 'Friend request declined!',
+      auto_success: name => {
+         return `${name} already had an active friend request so they were automatically friended.`;
+      },
       friended_success: name => {
          return `You're now friends with ${name}!`;
       },
@@ -394,6 +469,8 @@ command({
                   return player.sendMessage(feedback.friends.friendee_id_invalid);
                case 'ALREADY_SENT':
                   return player.sendMessage(feedback.friends.already_sent);
+               case 'AUTO_ACCEPTED':
+                  return player.sendMessage(feedback.friends.auto_success(args[1]));
                case true:
                   return player.sendMessage(feedback.friends.success(args[1]));
                case false:
@@ -416,6 +493,15 @@ command({
                   return player.sendMessage('fuck');
             }
          }
+         case 'deny': {
+            if (typeof args[1] == 'undefined') return;
+            switch (fn.declineRequest(uuid, fn.getUuidFromName(args[1]))) {
+               case 'FRIENDEE_ID_INVALID':
+                  return player.sendMessage(feedback.friends.friendee_id_invalid);
+               case true:
+                  return player.sendMessage(feedback.friends.declined_request);
+            }
+         }
          case 'accept': {
             if (typeof args[1] == 'undefined') return;
             switch (fn.addFriend(fn.getUuidFromName(args[1]), uuid)) {
@@ -428,6 +514,12 @@ command({
                case true:
                   return player.sendMessage(feedback.friends.friended_success(args[1]));
             }
+         }
+         default: {
+            feedback.friends.args.forEach(a => {
+               player.sendMessage(a);
+            });
+            break;
          }
       }
    },
@@ -442,6 +534,7 @@ event('org.bukkit.event.player.PlayerJoinEvent', {
    priority: 'HIGHEST',
    script: event => {
       const id = event.getPlayer().getUniqueId().toString();
+      if (!fn.userExists(id)) fn.addUser(id);
       //if (fn.getServer(id) != null)
    }
 });
