@@ -1,6 +1,6 @@
 {
   "name": "@brayjamin/cursed-network",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Protocols for cross-server communication under the CursedMC proxy. ",
   "main": "index.js",
   "scripts": {
@@ -12,7 +12,8 @@
   },
   "dependencies": {
     "@grakkit/socket": "1.0.4",
-    "@grakkit/stdlib-paper": "1.0.14"
+    "@grakkit/stdlib-paper": "1.0.14",
+    "@brayjamin/underscore": "1.1.0"
   },
   "devDependencies": {
     "typescript": "4.4.3"
