@@ -1,6 +1,6 @@
 {
   "name": "@brayjamin/cursed-network",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Protocols for cross-server communication under the CursedMC proxy. ",
   "main": "index.js",
   "scripts": {
