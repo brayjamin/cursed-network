@@ -175,7 +175,7 @@ const fn = {
         const q = sql.query(`SELECT * FROM friendships WHERE friendee_id = '${friendee_id}' AND friender_id = '${friender_id}' AND accepted_at IS NOT null AND blocked_at IS null`);
         if (q != null && q.next() && q.getString('accepted_at') != null) {
             // remove friend
-            return sql.update(justify('UPDATE friendships', 'SET accepted_at = NULL', `WHERE friendee_id = '${friendee_id}' OR friendee_id = '${friender_id}' AND friender_id = '${friender_id}' OR friender_id = '${friendee_id}'`, `AND accepted_at IS NOT null;`));
+            return sql.update(justify(`DELETE FROM friendships`, `WHERE friender_id = '${friender_id}' AND friendee_id = '${friendee_id}'`));
         }
         else
             return 'NOT_FRIENDS';
@@ -192,23 +192,20 @@ const fn = {
             return 'FRIENDER_ID_INVALID';
         if (!fn.userExists(friendee_id))
             return 'FRIENDEE_ID_INVALID';
-        if (sql.query(`SELECT * FROM friendships WHERE friendee_id = '${friendee_id}' AND friender_id = '${friender_id}' AND accepted_at IS null;`) != null &&
-            sql
-                .query(`SELECT * FROM friendships WHERE friendee_id = '${friendee_id}' AND friender_id = '${friender_id}' AND accepted_at IS null;`)
-                .next())
+        const q = sql.query(`SELECT * FROM friendships WHERE friendee_id = '${friendee_id}' AND friender_id = '${friender_id}' AND accepted_at IS null;`);
+        if (q != null && q.next())
             if (!sql.update(justify('UPDATE friendships', 'SET accepted_at = now()', `WHERE friendee_id = '${friendee_id}' AND friender_id = '${friender_id}'`, `AND accepted_at IS null`)))
                 /* add as a friend */
                 return sql.update(justify('UPDATE friendships', 'SET accepted_at = now()', `WHERE friendee_id = '${friender_id}' AND friender_id = '${friendee_id}'`, `AND accepted_at IS null`));
             else
                 return true;
-        else if (sql.query(`SELECT * FROM friendships WHERE friendee_id = '${friendee_id}' AND friender_id = '${friender_id}' OR friender_id = '${friendee_id}' AND accepted_at IS NOT null;`) != null &&
-            sql
-                .query(`SELECT * FROM friendships WHERE friendee_id = '${friendee_id}' AND friender_id = '${friender_id}' AND accepted_at IS NOT null;`)
-                .next())
-            /* if already friends */
-            return 'ALREADY_FRIEND';
-        else
-            return 'REQUEST_NOT_ACTIVE';
+        else {
+            const q2 = sql.query(`SELECT * FROM friendships WHERE friendee_id = '${friendee_id}' AND friender_id = '${friender_id}' AND accepted_at IS NOT null;`);
+            if (q2 != null && q2.next())
+                return 'ALREADY_FRIEND';
+            else
+                return 'REQUEST_NOT_ACTIVE';
+        }
     },
     sendFriendRequest(friender_id, friendee_id) {
         /* If a friend request exists */
@@ -313,8 +310,15 @@ const feedback = {
         friendee_id_invalid: 'This user does not exist!',
         already_sent: "You've already sent a friend request to this player!",
         not_friends: "You're already not friends with this player!",
+        request_not_active: "You haven't received a friend request from this player!",
+        friended_success: name => {
+            return `You're now friends with ${name}!`;
+        },
         success: name => {
             return 'A friend request has been sent to ' + name + '!';
+        },
+        remove_success: name => {
+            return `${name} has been removed from your friends list.`;
         }
     }
 };
@@ -356,8 +360,24 @@ const feedback = {
                         return player.sendMessage(feedback.friends.friendee_id_invalid);
                     case 'NOT_FRIENDS':
                         return player.sendMessage(feedback.friends.not_friends);
+                    case true:
+                        return player.sendMessage(feedback.friends.remove_success(args[1]));
                     default:
                         return player.sendMessage('fuck');
+                }
+            }
+            case 'accept': {
+                if (typeof args[1] == 'undefined')
+                    return;
+                switch (fn.addFriend(fn.getUuidFromName(args[1]), uuid)) {
+                    case 'ALREADY_FRIEND':
+                        return player.sendMessage(feedback.friends.already_friend);
+                    case 'FRIENDEE_ID_INVALID':
+                        return player.sendMessage(feedback.friends.friendee_id_invalid);
+                    case 'REQUEST_NOT_ACTIVE':
+                        return player.sendMessage(feedback.friends.request_not_active);
+                    case true:
+                        return player.sendMessage(feedback.friends.friended_success(args[1]));
                 }
             }
         }
