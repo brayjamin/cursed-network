@@ -1,6 +1,7 @@
-import { type, command, fetch, manager, event } from '@grakkit/stdlib-paper';
+import { type, command, fetch, manager, event, task } from '@grakkit/stdlib-paper';
 import { Client, Server } from '@grakkit/socket';
 import * as _ from '@brayjamin/underscore';
+import { obcCommandSender, obePlayer } from '@grakkit/types-paper';
 function decode (content: Uint8Array) {
    let index = 0;
    let string = '';
@@ -109,7 +110,7 @@ function register (type: NodeType, port: number, name: string) {
       if (typeof protocol == 'undefined') return;
       switch (protocol) {
          case 'SEND_MESSAGE': {
-            if (typeof Data.uuid != 'undefined' && typeof Data.message != 'undefined') {
+            if (Data.uuid && typeof Data.message != 'undefined') {
                //@ts-expect-error
                const player = server.getOfflinePlayer(UUID.fromString(Data.uuid));
                if (player.isOnline()) player.getPlayer().sendMessage(Data.message);
@@ -175,6 +176,9 @@ const fn = {
          ),
          [ 'friender_id', 'created_at' ]
       );
+   },
+   sendMessage (id, message) {
+      Protocol('SEND_MESSAGE', { uuid: id, message: message });
    },
    getFriends (id: string): object[] {
       return serializeResponse(
@@ -300,7 +304,77 @@ const fn = {
          )
       );
    },
+   // send friend request from friender_id to friendee_id
+   // use sql
+   // if user doesn't exist return 'FRIENDEE_ID_INVALID'
+   // if friend request already exists return 'REQUEST_ALREADY_EXISTS'
+   // if friendee_id already sent a friend request to friender_id, automatically accept the request
+   // if friendee_id is already a friend with friender_id, return 'ALREADY_FRIEND'
+   // if friendee_id is blocked by friender_id, return 'FRIENDEE_BLOCKED'
    sendFriendRequest (
+      friender_id,
+      friendee_id
+   ):
+      | 'FRIENDEE_ID_INVALID'
+      | 'REQUEST_ALREADY_EXISTS'
+      | 'ALREADY_FRIEND'
+      | 'FRIENDEE_BLOCKED'
+      | 'AUTO_ACCEPTED'
+      | 'REQUEST_SENT' {
+      if (!fn.userExists(friendee_id)) return 'FRIENDEE_ID_INVALID';
+      const q = sql.query(
+         justify(
+            `SELECT * FROM friendships`,
+            `WHERE friendee_id = '${friendee_id}' AND friender_id = '${friender_id}' AND accepted_at IS null;`
+         )
+      );
+      if (q != null && q.next()) return 'REQUEST_ALREADY_EXISTS';
+      const q2 = sql.query(
+         justify(
+            `SELECT * FROM friendships`,
+            `WHERE friendee_id = '${friender_id}' AND friender_id = '${friendee_id}' AND accepted_at IS null;`
+         )
+      );
+      if (q2 != null && q2.next()) {
+         fn.addFriend(friendee_id, friender_id);
+         return 'AUTO_ACCEPTED';
+      }
+      const q3 = sql.query(
+         justify(
+            `SELECT * FROM friendships`,
+            `WHERE`,
+            `('${friender_id}' in (friender_id) OR`,
+            `'${friendee_id}' in (friender_id))`,
+            `AND ('${friendee_id}' in (friendee_id)`,
+            `OR '${friender_id}' in (friendee_id))`,
+            `AND accepted_at IS NOT null;`
+         )
+      );
+      if (q3 != null && q3.next()) return 'ALREADY_FRIEND';
+      const q4 = sql.query(
+         justify(
+            `SELECT * FROM friendships`,
+            `WHERE`,
+            `('${friender_id}' in (friender_id) OR`,
+            `'${friendee_id}' in (friender_id))`,
+            `AND ('${friendee_id}' in (friendee_id)`,
+            `OR '${friender_id}' in (friendee_id))`,
+            `AND blocked_at IS NOT null;`
+         )
+      );
+      if (q4 != null && q4.next()) return 'FRIENDEE_BLOCKED';
+      sql.update(
+         justify(
+            `INSERT INTO friendships`,
+            `(friender_id, friendee_id, created_at)`,
+            `VALUES`,
+            `('${friender_id}', '${friendee_id}', now())`
+         )
+      );
+      return 'REQUEST_SENT';
+      // if the friendee_id sent a friend request to friender_id, automatically accept the request
+   },
+   sendFriendRequestBackup (
       friender_id,
       friendee_id
    ): boolean | 'AUTO_ACCEPTED' | 'ALREADY_SENT' | 'ALREADY_FRIEND' | 'FRIENDEE_ID_INVALID' {
@@ -363,6 +437,15 @@ const fn = {
          return null;
       }
    },
+   hasFriends (id: string): boolean {
+      const q = sql.query(
+         justify(
+            `SELECT * FROM friendships WHERE friendee_id = '${id}' OR friender_id = '${id}' AND accepted_at IS NOT null;`
+         )
+      );
+      if (q != null && q.next()) return true;
+      else return false;
+   },
    addUser (id: string): ResponseType {
       const q = sql.query(`SELECT * FROM users WHERE id = '${id}'`);
       if (q != null && q.next() && q.getString('id') != null) return 'ALREADY_EXISTS';
@@ -389,9 +472,10 @@ function filter (suggestions: string[], key) {
       return word.toLowerCase().includes(key.toLowerCase());
    });
 }
-function sendFriendList (player) {
+
+export function getFriendList (player) {
    const friends = fn.getFriends(player.getUniqueId().toString());
-   if (friends.length === 0) return player.sendMessage('You have no friends');
+   if (friends.length === 0) return [];
    const names = [];
    let i = names.length;
    friends.forEach(friend => {
@@ -411,23 +495,65 @@ function sendFriendList (player) {
       }
       i++;
    });
-   player.sendMessage(`Friends (${names.length}):`);
-   names.forEach(n => {
-      player.sendMessage(n);
-   });
+   return names;
 }
-const feedback = {
+export const feedback = {
    friends: {
-      args: [
-         'help for /friend',
-         ' ',
-         '/f add <name> - send a friend request',
-         '/f remove <name> - unfriend a player',
-         '/f list - view all your friends',
-         '/f accept <name> - accept a friend request',
-         '/f deny <name> - decline a friend request',
-         '/f | /f help - show this message'
-      ],
+      // return an an array of messages showing the user all the pending requests they have (make it pretty)
+      getPending: (name: string, Requests: string[]) => {
+         let requests = [];
+         Requests.forEach(request => {
+            requests[requests.length] = fn.getNameFromUuid(request);
+         });
+         if (requests.length === 1)
+            return [
+               `§f${requests[0]} §bhas requested to be your friend!`,
+               '§5§m                         ',
+               `To accept, type /friend accept [name]`,
+               `To deny, type /friend deny [name]`
+            ];
+         if (requests.length > 4) {
+            return [
+               `§bYou have §f${requests.length} §bpending §bfriend requests!`,
+               '§5§m                         ',
+               `§f${requests.slice(0, 4).join('§b,§f ')}`,
+               ` §r §r §d§o+ ${requests.length - 4} more`,
+               '§5§m                         ',
+               `§7To §aaccept§7, type §e/friend accept §d[name]`,
+               `§7To §cdeny§7, type §e/friend deny §d[name]`,
+               `§7To view all requests, type §e/friend pending`
+            ];
+         }
+         if (requests.length > 1) {
+            return [
+               `§bYou have §f${requests.length} §bpending friend requests!`,
+               '§5§m                         ',
+               `§f${requests.join('§b,§f ')}`,
+               '§5§m                         ',
+               `§7Respond with §3/friend §8<§3accept§7 | §3deny§8> §d[name]`
+            ];
+         }
+         return null;
+      },
+      friendee_blocked: '§cYou are blocked by this player.',
+      help: {
+         header: [ '§fHelp for §b/friend', '§5§m                         ' ],
+         body: [
+            '§3/f add §d[name]\n§8-> §7Send a friend request.',
+            '§3/f remove §d[name]\n§8-> §7Unfriend a player.',
+            '§3/f list\n§8-> §7View all your friends',
+            '§3/f accept §d[name]\n§8-> §7Accept a friend request',
+            '§3/f deny §d[name]\n§8-> §7Decline a friend request',
+            '§3/f help §d[page]\n§8-> §7Show this dialogue'
+         ]
+      },
+      list: {
+         header (player) {
+            const friends = getFriendList(player).length;
+            if (friends === 0) return [ '§fYou have no friends' ];
+            return [ `§fFriends (${friends}):`, '§5§m                         ' ];
+         }
+      },
       already_friend: 'You are already friends with this player!',
       friendee_id_invalid: 'This user does not exist!',
       already_sent: "You've already sent a friend request to this player!",
@@ -440,7 +566,7 @@ const feedback = {
       friended_success: name => {
          return `You're now friends with ${name}!`;
       },
-      success: name => {
+      request_sent: name => {
          return 'A friend request has been sent to ' + name + '!';
       },
       remove_success: name => {
@@ -448,7 +574,88 @@ const feedback = {
       }
    }
 };
-
+// a function where plugging in an array and a page number will return at most 10 items a page, plugging in a page number will return those
+// if array.slice(start, end) is empty, return array.slice(start)
+export function paginate (array: string[], page: number, max: number = 10) {
+   const start = (page - 1) * max;
+   const end = page * max;
+   if (array.slice(start, end).length === 0) return array.slice(start);
+   return array.slice(start, end);
+}
+// a function that returns the help header, an array of friends plugged into paginate, and a footer
+// if page is less than 1, return the first page
+export function returnFormatted (
+   options: {
+      player?: obePlayer | obcCommandSender;
+      args?: string[] | [];
+      header?: string[] | [];
+      body?: string[] | [];
+      topfooter?: string[] | [];
+      page?: number;
+      max?: number;
+      enable_pages?: boolean;
+   } = {
+      player: null,
+      args: null,
+      header: [],
+      body: [],
+      topfooter: [],
+      page: 1,
+      max: 10,
+      enable_pages: false
+   }
+) {
+   const { player, args, header, body, topfooter, page, max, enable_pages } = options;
+   if (enable_pages) {
+      let Page = page;
+      if (Page < 1) Page = 1;
+      if (page > Math.ceil(body.length / max)) Page = Math.ceil(body.length / max);
+      let footer = [];
+      footer = [ ' \n§7Page ' + Page + ' of ' + Math.ceil(body.length / max) ];
+      return [ header, paginate(body, Page, max), topfooter, footer ];
+   }
+   return [ header, body, topfooter ];
+}
+export function sendFormatted (
+   options: {
+      player?: obePlayer | obcCommandSender;
+      args?: string[] | [];
+      header?: string[] | [];
+      body?: string[] | [];
+      topfooter?: string[] | [];
+      page?: number;
+      max?: number;
+      enable_pages?: boolean;
+   } = {
+      player: null,
+      args: null,
+      header: [],
+      body: [],
+      topfooter: [],
+      page: 1,
+      max: 10,
+      enable_pages: false
+   }
+) {
+   const { player, args, header, body, topfooter, page, max, enable_pages } = options;
+   let Page = 1;
+   if (args && args[1]) Page = parseInt(args[1]);
+   returnFormatted({
+      player: player,
+      args: args,
+      header: header,
+      body: body,
+      topfooter: topfooter,
+      page: Page,
+      max: max,
+      enable_pages: enable_pages
+   }).forEach(section => {
+      if (section)
+         section.forEach(line => {
+            player.sendMessage(line);
+         });
+   });
+}
 command({
    name: 'friend',
    aliases: [ 'f', 'friends' ],
@@ -456,8 +663,32 @@ command({
       //@ts-expect-error
       const uuid = player.getUniqueId().toString();
       switch (args[0]) {
+         case 'help': {
+            let page = 1;
+            if (args[1]) page = parseInt(args[1]);
+            sendFormatted({
+               player: player,
+               args: args,
+               header: feedback.friends.help.header,
+               body: feedback.friends.help.body,
+               page: page,
+               max: 3,
+               enable_pages: true
+            });
+            break;
+         }
          case 'list': {
-            sendFriendList(player);
+            let page = 1;
+            if (args[1]) page = parseInt(args[1]);
+            sendFormatted({
+               player: player,
+               header: feedback.friends.list.header(player),
+               body: getFriendList(player),
+               topfooter: [ '§5§m                         ' ],
+               page: page,
+               max: 10,
+               enable_pages: fn.hasFriends(uuid)
+            });
             break;
          }
          case 'add': {
@@ -467,14 +698,14 @@ command({
                   return player.sendMessage(feedback.friends.already_friend);
                case 'FRIENDEE_ID_INVALID':
                   return player.sendMessage(feedback.friends.friendee_id_invalid);
-               case 'ALREADY_SENT':
+               case 'REQUEST_ALREADY_EXISTS':
                   return player.sendMessage(feedback.friends.already_sent);
                case 'AUTO_ACCEPTED':
                   return player.sendMessage(feedback.friends.auto_success(args[1]));
-               case true:
-                  return player.sendMessage(feedback.friends.success(args[1]));
-               case false:
-                  return player.sendMessage('you suck');
+               case 'FRIENDEE_BLOCKED':
+                  return player.sendMessage(feedback.friends.friendee_blocked);
+               case 'REQUEST_SENT':
+                  return player.sendMessage(feedback.friends.request_sent(args[1]));
                default:
                   return player.sendMessage('fuck');
             }
@@ -516,8 +747,16 @@ command({
             }
          }
          default: {
-            feedback.friends.args.forEach(a => {
-               player.sendMessage(a);
+            let page = 1;
+            if (args[1]) page = parseInt(args[1]);
+            sendFormatted({
+               player: player,
+               args: args,
+               header: feedback.friends.help.header,
+               body: feedback.friends.help.body,
+               page: page,
+               max: 3,
+               enable_pages: true
             });
             break;
          }
@@ -531,11 +770,25 @@ command({
    }
 });
 event('org.bukkit.event.player.PlayerJoinEvent', {
-   priority: 'HIGHEST',
+   priority: 'MONITOR',
    script: event => {
+      const player = event.getPlayer();
       const id = event.getPlayer().getUniqueId().toString();
-      if (!fn.userExists(id)) fn.addUser(id);
-      //if (fn.getServer(id) != null)
+      if (!fn.userExists(id)) return fn.addUser(id);
+      const requests = fn.getPendingRequestsReceived(id);
+      if (requests.length === 0) return;
+      core.task.timeout(() => {
+         //@ts-expect-error
+         player.sendMessage(' ');
+         sendFormatted({
+            player: player,
+            header: feedback.friends.getPending(
+               player.getName(),
+               //@ts-expect-error
+               requests.map(request => request.friender_id)
+            )
+         });
+      }, 2);
    }
 });
 export { thisClient, register, decode, encode, Proxy, Port, Protocol, Client, Server, fn, sql, serializeResponse };
